@@ -1,9 +1,11 @@
-
 "use client";
 
 import { useState } from "react";
 import Link from "next/link";
-import { createUserWithEmailAndPassword, updateProfile } from "firebase/auth";
+import {
+  createUserWithEmailAndPassword,
+  updateProfile,
+} from "firebase/auth";
 import { auth } from "@/lib/firebase";
 
 export default function SignupPage() {
@@ -32,7 +34,10 @@ export default function SignupPage() {
       window.location.href = "/dashboard";
     } catch (err: unknown) {
       const message =
-        err instanceof Error ? err.message : "Unable to create your account.";
+        err instanceof Error
+          ? err.message
+          : "Unable to create your account.";
+
       setError(message);
     } finally {
       setLoading(false);
@@ -47,6 +52,7 @@ export default function SignupPage() {
         </p>
 
         <h1 className="text-3xl font-bold">Create your account</h1>
+
         <p className="mt-2 text-sm text-slate-400">
           Start preparing for your next viva with AI.
         </p>
@@ -56,6 +62,7 @@ export default function SignupPage() {
             <label htmlFor="name" className="mb-2 block text-sm">
               Full name
             </label>
+
             <input
               id="name"
               type="text"
@@ -72,6 +79,7 @@ export default function SignupPage() {
             <label htmlFor="email" className="mb-2 block text-sm">
               Email address
             </label>
+
             <input
               id="email"
               type="email"
@@ -88,6 +96,7 @@ export default function SignupPage() {
             <label htmlFor="password" className="mb-2 block text-sm">
               Password
             </label>
+
             <input
               id="password"
               type="password"
