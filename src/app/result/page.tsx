@@ -3,6 +3,8 @@
 
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
+import { onAuthStateChanged } from "firebase/auth";
+import { auth } from "@/lib/firebase";
 
 type VivaSettings = {
   subject: string;
@@ -13,6 +15,7 @@ type VivaSettings = {
 };
 
 type VivaResultData = {
+  sessionId?: string;
   settings: VivaSettings;
   questions?: string[];
   answers: string[];
@@ -33,6 +36,15 @@ type EvaluationState = {
   error?: string;
 };
 
+type VivaSession = {
+  id: string;
+  completedAt: string;
+  settings: VivaSettings;
+  questions: string[];
+  answers: string[];
+  evaluations: (Evaluation | null)[];
+};
+
 export default function ResultPage() {
   const router = useRouter();
 
@@ -40,8 +52,23 @@ export default function ResultPage() {
   const [evaluations, setEvaluations] = useState<EvaluationState[]>([]);
   const [ready, setReady] = useState(false);
   const [evaluating, setEvaluating] = useState(false);
+  const [evaluationFinished, setEvaluationFinished] = useState(false);
   const [error, setError] = useState("");
+  const [userUid, setUserUid] = useState<string | null>(null);
+  const [authReady, setAuthReady] = useState(false);
+  const [historySaved, setHistorySaved] = useState(false);
 
+  // Get the signed-in Firebase user's UID.
+  useEffect(() => {
+    const unsubscribe = onAuthStateChanged(auth, (user) => {
+      setUserUid(user?.uid ?? null);
+      setAuthReady(true);
+    });
+
+    return unsubscribe;
+  }, []);
+
+  // Load the viva and evaluate each answer.
   useEffect(() => {
     let cancelled = false;
 
@@ -64,6 +91,13 @@ export default function ResultPage() {
           !data.settings.subject
         ) {
           throw new Error("Invalid saved viva data.");
+        }
+
+        // Keep the same ID when this result page is refreshed.
+        // A new viva creates a new vivaAnswers entry.
+        if (!data.sessionId) {
+          data.sessionId = crypto.randomUUID();
+          sessionStorage.setItem("vivaAnswers", JSON.stringify(data));
         }
       } catch {
         sessionStorage.removeItem("vivaAnswers");
@@ -92,42 +126,47 @@ export default function ResultPage() {
       setEvaluating(true);
 
       const results = await Promise.all(
-        questions.map(async (question, index): Promise<EvaluationState> => {
-          try {
-            const response = await fetch("/api/evaluate-answer", {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({
-                subject: data.settings.subject,
-                difficulty: data.settings.difficulty,
-                question,
-                answer: data.answers[index],
-              }),
-            });
+        questions.map(
+          async (question, index): Promise<EvaluationState> => {
+            try {
+              const response = await fetch("/api/evaluate-answer", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                  subject: data.settings.subject,
+                  difficulty: data.settings.difficulty,
+                  question,
+                  answer: data.answers[index],
+                }),
+              });
 
-            const evaluationData = await response.json();
+              const evaluationData = await response.json();
 
-            if (!response.ok) {
-              throw new Error(
-                evaluationData.error || "Evaluation failed."
-              );
+              if (!response.ok) {
+                throw new Error(
+                  evaluationData.error || "Evaluation failed."
+                );
+              }
+
+              return {
+                evaluation: evaluationData as Evaluation,
+              };
+            } catch (err) {
+              return {
+                error:
+                  err instanceof Error
+                    ? err.message
+                    : "Unable to evaluate this answer.",
+              };
             }
-
-            return { evaluation: evaluationData as Evaluation };
-          } catch (err) {
-            return {
-              error:
-                err instanceof Error
-                  ? err.message
-                  : "Unable to evaluate this answer.",
-            };
           }
-        })
+        )
       );
 
       if (!cancelled) {
         setEvaluations(results);
         setEvaluating(false);
+        setEvaluationFinished(true);
       }
     }
 
@@ -137,6 +176,71 @@ export default function ResultPage() {
       cancelled = true;
     };
   }, [router]);
+
+  // Save the completed session for the Performance Dashboard.
+  useEffect(() => {
+    if (
+      !authReady ||
+      !userUid ||
+      !result ||
+      !result.sessionId ||
+      !evaluationFinished ||
+      !Array.isArray(result.questions)
+    ) {
+      return;
+    }
+
+    try {
+      const storageKey = `vivaHistory_${userUid}`;
+      const savedHistory = localStorage.getItem(storageKey);
+
+      let history: VivaSession[] = [];
+
+      if (savedHistory) {
+        const parsed: unknown = JSON.parse(savedHistory);
+
+        if (Array.isArray(parsed)) {
+          history = parsed as VivaSession[];
+        }
+      }
+
+      // Avoid adding the same viva twice after a page refresh.
+      const alreadySaved = history.some(
+        (session) => session.id === result.sessionId
+      );
+
+      if (!alreadySaved) {
+        const session: VivaSession = {
+          id: result.sessionId,
+          completedAt: new Date().toISOString(),
+          settings: result.settings,
+          questions: result.questions,
+          answers: result.answers,
+          evaluations: evaluations.map(
+            (item) => item.evaluation ?? null
+          ),
+        };
+
+        localStorage.setItem(
+          storageKey,
+          JSON.stringify([session, ...history])
+        );
+      }
+
+      setHistorySaved(true);
+    } catch (err) {
+      console.error("Unable to save viva history:", err);
+      setError(
+        "Your results are visible, but the performance history could not be saved in this browser."
+      );
+    }
+  }, [
+    authReady,
+    userUid,
+    result,
+    evaluations,
+    evaluationFinished,
+  ]);
 
   if (!ready || !result) {
     return (
@@ -151,11 +255,16 @@ export default function ResultPage() {
     0
   );
 
-  const evaluatedCount = evaluations.filter(
+  const evaluatedItems = evaluations.filter(
     (item) => item.evaluation
-  ).length;
+  );
 
-  const maxScore = evaluatedCount * 10;
+  const evaluatedCount = evaluatedItems.length;
+
+  const maxScore = evaluatedItems.reduce(
+    (sum, item) => sum + (item.evaluation?.maxScore ?? 0),
+    0
+  );
 
   return (
     <main className="min-h-screen bg-slate-950 px-4 py-10 text-white">
@@ -164,11 +273,19 @@ export default function ResultPage() {
           VIVA-X
         </p>
 
-        <h1 className="mt-3 text-3xl font-bold">Viva Completed!</h1>
+        <h1 className="mt-3 text-3xl font-bold">
+          Viva Completed!
+        </h1>
 
         <p className="mt-2 text-slate-400">
           Your {result.settings.subject} practice session results.
         </p>
+
+        {historySaved && (
+          <p className="mt-4 text-sm text-emerald-300">
+            ✓ Performance history saved successfully.
+          </p>
+        )}
 
         <section className="mt-8 rounded-2xl border border-slate-800 bg-slate-900 p-6">
           <h2 className="text-xl font-semibold">Session Summary</h2>
@@ -189,13 +306,19 @@ export default function ResultPage() {
             </div>
 
             <div className="rounded-xl bg-slate-950 p-4">
-              <p className="text-sm text-slate-400">Answers submitted</p>
-              <p className="mt-1 font-semibold">{result.answers.length}</p>
+              <p className="text-sm text-slate-400">
+                Answers submitted
+              </p>
+              <p className="mt-1 font-semibold">
+                {result.answers.length}
+              </p>
             </div>
 
             <div className="rounded-xl bg-slate-950 p-4">
               <p className="text-sm text-slate-400">Mode</p>
-              <p className="mt-1 font-semibold">{result.settings.mode}</p>
+              <p className="mt-1 font-semibold">
+                {result.settings.mode}
+              </p>
             </div>
           </div>
 
@@ -225,8 +348,8 @@ export default function ResultPage() {
                 {totalScore} / {maxScore}
               </p>
               <p className="mt-2 text-sm text-slate-400">
-                {evaluatedCount} of {result.answers.length} answers evaluated.
-                Failed evaluations are excluded from this total.
+                {evaluatedCount} of {result.answers.length} answers
+                evaluated. Failed evaluations are excluded.
               </p>
             </div>
           )}
@@ -288,7 +411,9 @@ export default function ResultPage() {
                   {evaluation && (
                     <div className="mt-5 space-y-4 border-t border-slate-800 pt-5">
                       <div>
-                        <p className="text-sm text-slate-400">Verdict</p>
+                        <p className="text-sm text-slate-400">
+                          Verdict
+                        </p>
                         <p className="mt-1 font-semibold">
                           {evaluation.verdict}
                         </p>
@@ -329,7 +454,9 @@ export default function ResultPage() {
                       </div>
 
                       <div>
-                        <p className="font-semibold">Examiner feedback</p>
+                        <p className="font-semibold">
+                          Examiner feedback
+                        </p>
                         <p className="mt-2 text-sm leading-relaxed text-slate-300">
                           {evaluation.feedback}
                         </p>
